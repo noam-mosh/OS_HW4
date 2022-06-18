@@ -45,9 +45,13 @@ class BlockList {
 
         MallocMetadata* current = head;
         while (current && current->size < size) {
+            if (current == tail){
+                current->next = new_block;
+                new_block->prev = current;
+                tail = new_block;
+                return new_block->address;
+            }
             current = current->next;
-            if (current == nullptr)
-                return nullptr;
         }
         size_t tmp_size = current->size;
 
