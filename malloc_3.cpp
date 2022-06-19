@@ -22,7 +22,7 @@ class BlockList {
     size_t num_allocated_blocks = 0;
     size_t num_allocated_bytes = 0;
 
-    void* Insert(start_p, size)
+    void* Insert(void* start_p, size_t size)
     {
         MallocMetadata* new_block = (MallocMetadata*) sbrk(sizeof(*new_block));
         if (new_block == (void*)(-1)){
@@ -80,6 +80,32 @@ class BlockList {
         return new_block->address;
     }
 
+    void Remove(MallocMetadata* block)
+    {
+        if (block == nullptr)
+            return;
+
+        if (block->prev && block->next)
+        {
+            block->prev->next = block->next;
+            block->next->prev = block->prev;
+            return;
+        }
+        if (block == head)
+        {
+            head = block->next;
+            if (block->next)
+                block->next->prev = nullptr;
+        }
+
+        if (block == tail)
+        {
+            tail = block->prev;
+            if (block->prev)
+                block->prev->next = nullptr;
+        }
+    }
+
     void* AssignBlock(size_t size)
     {
         if (head == nullptr)
@@ -92,6 +118,12 @@ class BlockList {
         if (current == nullptr)
             return nullptr;
 
+        if (current->size - size >= 128 + _size_meta_data())
+        {
+            void* address = Insert(current->address + size + _size_meta_data(), current->size - size - _size_meta_data());
+            SetToFree(address);
+            current->size = size;
+        }
         current->is_free = false;
         num_free_blocks--;
         num_free_bytes -= current->size;
@@ -129,6 +161,23 @@ class BlockList {
                 current->is_free = true;
                 num_free_blocks++;
                 num_free_bytes += current->size;
+                if (current->prev && current->prev->is_free)
+                {
+                    current->prev->size += current->size + _size_meta_data();
+                    current = current->prev;
+                    Remove(current->next);
+
+                    num_free_blocks--;
+                    num_free_bytes += _size_meta_data();
+                }
+                if (current->next && current->next->is_free)
+                {
+                    current->size += current->next->size + _size_meta_data();
+                    Remove(current->next);
+
+                    num_free_blocks--;
+                    num_free_bytes += _size_meta_data();
+                }
                 return;
             }
             current = current->next;
