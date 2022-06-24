@@ -26,8 +26,7 @@ class mmapList:BlockList {
 
 public:
     void* mmapInsert(size_t size) {
-        void *address = mmap(NULL, size + get_metadata_size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1,
-                             0);
+        void *address = mmap(NULL, size + get_metadata_size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if (address == (void *) (-1)) {
             return nullptr;
         }
@@ -41,6 +40,7 @@ public:
         MallocMetadata* current = head;
         while (current) {
             if (current->address == address) {
+                munmap(address - _size_meta_data(), current->size + _size_meta_data());
                 Remove(current);
                 return;
             }
@@ -267,6 +267,7 @@ class BlockList {
 
 
 BlockList* block_list = (BlockList*) sbrk(sizeof(*block_list));
+mmapList* mmap_list = (mmapList*) sbrk(sizeof(*mmap_list));
 
 //Searches for a free block with at least‘size’ bytes or allocates (sbrk()) one if none are found.
 //Return value:
@@ -281,7 +282,7 @@ void* smalloc(size_t size)
         return nullptr;
 
     if (size >= MMAP_MIN_ALOC_SIZE)
-        return mmapList->mmapInsert(size);
+        return mmap_list->mmapInsert(size);
 
     void* start_p = block_list->AssignAndSplitBlock(size);
     if (start_p != nullptr) {
