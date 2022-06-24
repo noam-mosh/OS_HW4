@@ -11,7 +11,7 @@ class MallocMetadata {
     MallocMetadata* next;
     MallocMetadata* prev;
     void* address;
-    friend List;
+    friend class List;
 };
 
 class BlockList {
@@ -185,7 +185,7 @@ void* srealloc(void* oldp, size_t size)
 
     return address;
 }
-
+ //todo: perhaps this functions should be private?
 //Returns the number of allocated blocks in the heap that are currently free
 size_t _num_free_blocks()
 {

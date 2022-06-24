@@ -4,6 +4,7 @@
 #include <cstring>
 
 #define MAX_ALOC_SIZE (100000000)
+#define MMAP_MIN_ALOC_SIZE (128*1024)
 
 class MallocMetadata {
     size_t size;
@@ -11,8 +12,42 @@ class MallocMetadata {
     MallocMetadata* next;
     MallocMetadata* prev;
     void* address;
-    friend List;
+    friend class List;
+    friend class mmapList;
 };
+
+//todo:not sure about inheritance
+class mmapList:BlockList {
+    MallocMetadata *head = nullptr;
+    MallocMetadata *tail = nullptr;
+    size_t num_allocated_blocks = 0;
+    size_t num_allocated_bytes = 0;
+    size_t num_of_metadata_blocks = 0;
+
+public:
+    void* mmapInsert(size_t size) {
+        void *address = mmap(NULL, size + get_metadata_size(), PROT_WRITE | PROT_READ, MAP_ANONYMOUS | MAP_PRIVATE, -1,
+                             0);
+        if (address == (void *) (-1)) {
+            return nullptr;
+        }
+        MallocMetadata *new_block = (MallocMetadata *) address;
+        void *data_address = (char *) address + _size_meta_data();
+
+        return Insert(new_block, data_address, size);
+    }
+
+    void mmapFree(void* address) {
+        MallocMetadata* current = head;
+        while (current) {
+            if (current->address == address) {
+                Remove(current);
+                return;
+            }
+            current = current->next;
+        }
+    }
+}
 
 class BlockList {
     MallocMetadata* head = nullptr;
@@ -22,9 +57,8 @@ class BlockList {
     size_t num_allocated_blocks = 0;
     size_t num_allocated_bytes = 0;
 
-    void* Insert(void* start_p, size_t size)
+    void* Insert(MallocMetadata* new_block, void* start_p, size_t size)
     {
-        MallocMetadata* new_block = (MallocMetadata*) sbrk(sizeof(*new_block));
         if (new_block == (void*)(-1)){
             return nullptr;
         }
@@ -80,6 +114,15 @@ class BlockList {
         return new_block->address;
     }
 
+    void* Insert(void* start_p, size_t size)
+    {
+        MallocMetadata* new_block = (MallocMetadata*) sbrk(sizeof(*new_block));
+        if (new_block == (void*)(-1)){
+            return nullptr;
+        }
+        return Insert(new_block, start_p, size);
+    }
+
     void Remove(MallocMetadata* block)
     {
         if (block == nullptr)
@@ -106,28 +149,45 @@ class BlockList {
         }
     }
 
-    void* AssignBlock(size_t size)
+    void* AssignAndSplitBlock(size_t size)
     {
         if (head == nullptr)
             return nullptr;
         MallocMetadata* current = head;
-        while ((current && current->size < size) || (current && !(current->is_free))) {
+        while ((current && current->size < size + 128 + _size_meta_data()) || (current && !(current->is_free))) {
             current = current->next;
         }
 
         if (current == nullptr)
             return nullptr;
 
-        if (current->size - size >= 128 + _size_meta_data())
-        {
-            void* address = Insert(current->address + size + _size_meta_data(), current->size - size - _size_meta_data());
-            SetToFree(address);
-            current->size = size;
-        }
+        void* address = Insert(current->address + size + _size_meta_data(), current->size - size - _size_meta_data());
+        SetToFree(address);
+        current->size = size;
+
         current->is_free = false;
         num_free_blocks--;
         num_free_bytes -= current->size;
         return current->address;
+    }
+
+    void* AssignBlock(size_t size)
+    {
+        if (head == nullptr)
+            return nullptr;
+        MallocMetadata* current = head;
+        while (current)
+        {
+            if (current->is_free && current->size >= size)
+            {
+                current->is_free = false;
+                num_free_blocks--;
+                num_free_bytes -= current->size;
+                return current->address;
+            }
+            current = current->next;
+        }
+        return nullptr;
     }
 
     void* AssignBlock(void* address)
@@ -184,6 +244,25 @@ class BlockList {
         }
     }
 
+    void* AssignWildernessBlock(size_t size) {
+        MallocMetadata* current = head;
+        while (current && current->size == head->size) {
+            if (current->is_free) {
+                // Increase the size of the wilderness block
+                void *address = sbrk(size - current->size);
+                if (address == (void *) (-1)) {
+                    return nullptr;
+                }
+                num_free_bytes -= current->size;
+                num_free_blocks--;
+                current->size += (size - current->size);
+                num_allocated_bytes += (size - current->size);
+                return current->address;
+            }
+            current = current->next;
+        }
+        return nullptr;
+    }
 };
 
 
@@ -201,14 +280,29 @@ void* smalloc(size_t size)
     if (size == 0 || size > MAX_ALOC_SIZE)
         return nullptr;
 
-    void* start_p = block_list->AssignBlock(size);
-    if (start_p == nullptr)
-    {
-        // no free block available in free list- need to create a new one
-        if ((start_p = sbrk(size) == (void*)(-1)))
-            return nullptr;
-        start_p = block_list->Insert(start_p, size);
+    if (size >= MMAP_MIN_ALOC_SIZE)
+        return mmapList->mmapInsert(size);
+
+    void* start_p = block_list->AssignAndSplitBlock(size);
+    if (start_p != nullptr) {
+        return start_p;
     }
+
+    start_p = block_list->AssignBlock(size);
+    if (start_p != nullptr) {
+        return start_p;
+    }
+
+    start_p = block_list->AssignWildernessBlock(size);
+    if (start_p != nullptr) {
+        return start_p;
+    }
+
+    // no free block available in free list- need to create a new one
+    if ((start_p = sbrk(size) == (void*)(-1)))
+        return nullptr;
+    start_p = block_list->Insert(start_p, size);
+
     return start_p;
 }
 
@@ -264,6 +358,8 @@ void* srealloc(void* oldp, size_t size)
 
     return address;
 }
+
+//todo: perhaps this functions should be private?
 
 //Returns the number of allocated blocks in the heap that are currently free
 size_t _num_free_blocks()
