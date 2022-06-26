@@ -26,7 +26,7 @@ public:
     size_t num_allocated_blocks = 0;
     size_t num_allocated_bytes = 0;
 
-    void *Insert(MallocMetadata* new_block, void* start_p, size_t size);
+    void *Insert(MallocMetadata* new_block, void* start_p, size_t size, bool not_new);
     void *Insert(void* start_p, size_t size);
     void Remove(MallocMetadata* block);
     void *AssignAndSplitBlock(size_t size);
@@ -84,11 +84,13 @@ size_t _size_meta_data()
 }
 
 
-void* BlockList::Insert(MallocMetadata* new_block, void* start_p, size_t size)
+void* BlockList::Insert(MallocMetadata* new_block, void* start_p, size_t size, bool not_new)
 {
     if (new_block == (void*)(-1)){
         return nullptr;
     }
+    if (not_new)
+        Remove(new_block);
     new_block->size = size;
     new_block->is_free = false;
     new_block->address = start_p;
@@ -115,15 +117,16 @@ void* BlockList::Insert(MallocMetadata* new_block, void* start_p, size_t size)
         current = current->next;
     }
     size_t tmp_size =  current->size;
-    if (current && current->prev){
-        current = current->prev;
-        tmp_size = (current->next)->size;
-    }
-    else
-        tmp_size = current->size;
+//    if (current && current->prev){
+//        current = current->prev;
+//        tmp_size = (current->next)->size;
+//    }
+//    else
+//        tmp_size = current->size;
 
     current = head;
-    while (current && current->size == tmp_size) {
+    while (current && current->size <= tmp_size) {
+        //if (current == tail && current != new_block){
         if (current == tail){
             current->next = new_block;
             new_block->prev = current;
@@ -139,11 +142,12 @@ void* BlockList::Insert(MallocMetadata* new_block, void* start_p, size_t size)
         head = new_block;
         return new_block->address;
     }
-
-    current->prev->next = new_block;
-    new_block->prev = current->prev;
-    current->prev = new_block;
-    new_block->next = current;
+    if (current && current->prev){
+        current->prev->next = new_block;
+        new_block->prev = current->prev;
+        current->prev = new_block;
+        new_block->next = current;
+    }
 
     return new_block->address;
 }
@@ -154,7 +158,9 @@ void* BlockList::Insert(void* start_p, size_t size)
     if (new_block == (void*)(-1)){
         return nullptr;
     }
-    return Insert(new_block, start_p, size);
+    void* addr = (void*)((unsigned long)new_block + _size_meta_data());
+    //void* addr_ = (void*)_size_meta_data();
+    return Insert(new_block, addr, size, false);
 }
 
 void BlockList::Remove(MallocMetadata* block)
@@ -199,14 +205,15 @@ void* BlockList::AssignAndSplitBlock(size_t size)
     num_free_blocks--;
     num_free_bytes -= current->size;
     num_allocated_blocks--;
-    //current->is_free = false;
+    current->is_free = false;
 
     size_t old_size = current->size;
     void* curr_addr = current->address;
-    //current->size = size;
-    Remove(current);
-    void* address = Insert(curr_addr, size);
-    address = Insert(curr_addr + size + _size_meta_data(), old_size - size - _size_meta_data());
+
+    void* address = Insert(current, curr_addr, size, true);
+
+    MallocMetadata* new_block = (MallocMetadata*) ((unsigned long) current+ _size_meta_data()+size);
+    address = Insert(new_block, curr_addr + size + _size_meta_data(), old_size - size - _size_meta_data(), false);
 
     SetToFree(address);
 
@@ -252,10 +259,13 @@ void* BlockList::AssignBlockRealloc(void* address, size_t new_size, bool *split)
             size_t old_size = current->size;
             void* curr_addr = current->address;
 
-            Remove(current);
+            //Remove(current);
+            address = Insert(current, curr_addr, new_size, true);
 
-            address = Insert(curr_addr, new_size);
-            address = Insert(curr_addr + new_size + _size_meta_data(), old_size - new_size - _size_meta_data());
+            MallocMetadata* new_block = (MallocMetadata*) ((unsigned long) current + _size_meta_data()+ new_size);
+            //address = Insert(new_block, curr_addr + size + _size_meta_data(), old_size - size - _size_meta_data(), false);
+
+            address = Insert(new_block, curr_addr + new_size + _size_meta_data(), old_size - new_size - _size_meta_data(), false);
 
             SetToFree(address);
             *split = true;
@@ -278,11 +288,11 @@ void* BlockList::MergeBlocks(void* address, size_t new_size) {
         if (current->address == address) {
             MallocMetadata* to_remove = GetBlockByAddr(address+current->size+_size_meta_data());
             Remove(to_remove);
-            Remove(current);
+            //Remove(current);
             //current->size = new_size;
             num_allocated_bytes -= (new_size - _size_meta_data());
             num_allocated_blocks -=2;
-            address = Insert(address, new_size);
+            address = Insert(current, address, new_size, true);
             return address;
         }
         current = current->next;
@@ -304,14 +314,16 @@ void BlockList::SetToFree (void* address)
                 MallocMetadata *next_block = GetBlockByAddr(address + current->size + _size_meta_data());
                 if (next_block != nullptr) {
                     size_t new_size = current->size + next_block->size + _size_meta_data();
-                    Remove(current);
+                    //Remove(current);
                     Remove(next_block);
                     num_free_blocks--;
                     num_free_bytes += _size_meta_data();
                     num_allocated_bytes += _size_meta_data();
                     num_allocated_blocks -= 2;
                     num_allocated_bytes -= new_size;
-                    void *addr = Insert(address, new_size);
+                    void *addr = Insert(current, address, new_size, true);
+
+                    //void *addr = Insert(address, new_size);
                     current = GetBlockByAddr(addr);
                     current->is_free = true;
                 }
@@ -322,13 +334,14 @@ void BlockList::SetToFree (void* address)
                     size_t new_size = current->size + prev_block->size + _size_meta_data();
                     void *new_addr = prev_block->address;
                     Remove(current);
-                    Remove(prev_block);
+                    //Remove(prev_block);
                     num_free_blocks--;
                     num_free_bytes += _size_meta_data();
                     num_allocated_bytes += _size_meta_data();
                     num_allocated_blocks -= 2;
                     num_allocated_bytes -= new_size;
-                    void *addr = Insert(new_addr, new_size);
+                    void *addr = Insert(prev_block, new_addr, new_size, true);
+                    //void *addr = Insert(new_addr, new_size);
                     current = GetBlockByAddr(addr);
                     current->is_free = true;
                 }
@@ -462,7 +475,7 @@ void* mmapList::mmapInsert(size_t size) {
     MallocMetadata *new_block = (MallocMetadata *) address;
     void *data_address = (char *) address + _size_meta_data();
 
-    return Insert(new_block, data_address, size);
+    return Insert(new_block, data_address, size, false);
 }
 
 void mmapList::mmapFree(void* address) {
@@ -520,10 +533,10 @@ void* smalloc(size_t size)
     }
 
     // no free block available in free list- need to create a new one
-    start_p = sbrk(size);
-    if (start_p == (void*)(-1))
-        return nullptr;
     start_p = block_list->Insert(start_p, size);
+    void* res = sbrk(size);
+    if (res == (void*)(-1))
+        return nullptr;
 
     return start_p;
 }
@@ -583,22 +596,23 @@ void* srealloc(void* oldp, size_t size)
     size_t new_size = block_list->GetBlockSizeByAddr(oldp) + prev->size + _size_meta_data();
     if (prev != nullptr && prev->is_free) {
         if (new_size >= size) {
-            address = block_list->MergeBlocks(prev->address, new_size);
             block_list->num_free_blocks--;
             block_list->num_free_bytes -= prev->size;
+            address = block_list->MergeBlocks(prev->address, new_size);
             address = block_list->AssignBlockRealloc(prev->address, size, &split);
-            if (!split) {
-                prev->is_free = false;
-                //block_list->num_free_blocks--;
-            }
+//            if (!split) {
+//                prev->is_free = false;
+//                //block_list->num_free_blocks--;
+//            }
             address = memmove(prev->address, oldp, org_size);
             return address;
         }
         MallocMetadata *wilderness = block_list->FindWilderness();
         if (wilderness->address == oldp) {
-            address = block_list->MergeBlocks(prev->address, new_size);
             block_list->num_free_bytes -= prev->size;
             block_list->num_free_blocks--;
+            address = block_list->MergeBlocks(prev->address, new_size);
+
             address = sbrk(size - new_size);
             if (address == (void *) (-1)) {
                 return nullptr;
@@ -625,42 +639,46 @@ void* srealloc(void* oldp, size_t size)
         new_size = next->size + block_list->GetBlockSizeByAddr(oldp) + _size_meta_data();
         if (new_size >= size)
         {
-            address = block_list->MergeBlocks(oldp, new_size);
             block_list->num_free_blocks--;
             block_list->num_free_bytes -= next->size;
+            address = block_list->MergeBlocks(oldp, new_size);
             address = block_list->AssignBlockRealloc(old_block->address, size, &split);
-            if (!split) {
-                next->is_free = false;
-                //block_list->num_free_blocks--;
-            }
+//            if (!split) {
+//                next->is_free = false;
+//                //block_list->num_free_blocks--;
+//            }
             address = memmove(oldp, oldp, org_size); //TODO: NEED?
             return address;
         }
         if (prev && prev->is_free) {
             new_size += prev->size + _size_meta_data();
             if (new_size >= size){
-                address = block_list->MergeBlocks(old_block->address, new_size - prev->size - _size_meta_data());
+                void* prev_addr = prev->address;
                 block_list->num_free_blocks--;
                 block_list->num_free_bytes -= prev->size;
-                address = block_list->MergeBlocks(prev->address, new_size);
+                address = block_list->MergeBlocks(old_block->address, new_size - prev->size - _size_meta_data());
                 block_list->num_free_blocks--;
                 block_list->num_free_bytes -= next->size;
-                address = block_list->AssignBlockRealloc(prev->address, size, &split);
-                if (!split) {
-                    prev->is_free = false;
-                    //block_list->num_free_blocks -= 2;
-                }
-                address = memmove(prev->address, oldp, org_size);
+                address = block_list->MergeBlocks(prev_addr, new_size);
+
+                address = block_list->AssignBlockRealloc(prev_addr, size, &split);
+//                if (!split) {
+//                    prev->is_free = false;
+//                    //block_list->num_free_blocks -= 2;
+//                }
+                address = memmove(prev_addr, oldp, org_size);
                 return address;
             }
             MallocMetadata *wilderness = block_list->FindWilderness();
             if (wilderness->address == next->address) {
-                address = block_list->MergeBlocks(old_block->address, new_size - next->size - _size_meta_data());
                 block_list->num_free_blocks--;
                 block_list->num_free_bytes -= next->size;
-                address = block_list->MergeBlocks(prev->address, new_size);
+                address = block_list->MergeBlocks(old_block->address, new_size - next->size - _size_meta_data());
+
                 block_list->num_free_blocks--;
                 block_list->num_free_bytes -= prev->size;
+                address = block_list->MergeBlocks(prev->address, new_size);
+
                 address = sbrk(size - new_size);
                 if (address == (void *) (-1)) {
                     return nullptr;
@@ -682,8 +700,9 @@ void* srealloc(void* oldp, size_t size)
             }
             block_list->num_allocated_bytes += (size - new_size);
             //wilderness->size += (size - wilderness->size);
-            old_block->size = size;
-            return old_block->address;
+            MallocMetadata *new_block = block_list->GetBlockByAddr(oldp);
+            new_block->size = size;
+            return new_block->address;
         }
 
     }
@@ -698,7 +717,7 @@ void* srealloc(void* oldp, size_t size)
 
 //todo: perhaps this functions should be private?
 
-//#define ASSERT_EQUAL(a,b)  \
+#define ASSERT_EQUAL(a,b)  \
 //if(a != b){  \
 //    printf("fail\n"); \
 //    exit(0);               \
@@ -707,17 +726,12 @@ void* srealloc(void* oldp, size_t size)
 //
 //int main()
 //{
-//    void* p0 = smalloc(5000);
 //    void* p1 = smalloc(5000);
 //    void* p2 = smalloc(5000);
 //    void* p3 = smalloc(5000);
+//    sfree(p1);
 //    sfree(p3);
-//
 //    void* p4 = srealloc(p2, 20000);
-//    sfree(p4);
-//
-//    void* p5 = srealloc(p1,30000);
-//
 //    ASSERT_EQUAL(_num_free_blocks(), 0);
 //    ASSERT_EQUAL(_num_free_bytes(),0);
 //    ASSERT_EQUAL(_num_allocated_blocks(),3);
